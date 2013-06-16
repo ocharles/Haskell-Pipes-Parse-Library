@@ -1,6 +1,6 @@
 -- | Parsing utilities for pipes
 
-module Control.Proxy.Parse (
+module Pipes.Parse (
     -- * Pushback and Leftovers
     -- $pushback
     draw,
@@ -30,27 +30,16 @@ module Control.Proxy.Parse (
 
     -- * Re-exports
     -- $reexports
-    module Control.Proxy.Trans.State,
     module Data.Monoid
     ) where
 
 import Control.Monad (forever)
-import Control.Proxy ((>->), (\>\), (//>), (>\\), (?>=))
-import qualified Control.Proxy as P
-import Control.Proxy.Trans.State (
-    StateP(StateP, unStateP),
-    state,
-    stateT,
-    runStateP,
-    runStateK,
-    evalStateP,
-    evalStateK,
-    execStateP,
-    execStateK,
-    get,
-    put,
-    modify,
-    gets )
+import Control.Monad.Morph (hoist)
+import Control.Monad.Trans.Class (lift)
+import qualified Control.Monad.Trans.State.Strict as S
+import Pipes ((>->), (\>\), (//>), (>\\))
+import qualified Pipes as P
+import qualified Pipes.Prelude as P
 import Data.Monoid (Monoid(mempty, mappend))
 
 {- $pushback
@@ -62,23 +51,23 @@ import Data.Monoid (Monoid(mempty, mappend))
 
     A 'Nothing' return value indicates end of input.
 -}
-draw :: (Monad m, P.Proxy p) => StateP [a] p () (Maybe a) y' y m (Maybe a)
+draw :: Monad m => P.Proxy () (Maybe a) y' y (S.StateT [a] m) (Maybe a)
 draw = do
-    s <- get
+    s <- lift S.get
     case s of
         []   -> P.request ()
         a:as -> do
-            put as
+            lift . S.put $ as
             return (Just a)
 {-# INLINABLE draw #-}
 
 -- | Push an element back onto the leftovers buffer
-unDraw :: (Monad m, P.Proxy p) => a -> StateP [a] p x' x y' y m ()
-unDraw a = modify (a:)
+unDraw :: Monad m => a -> P.Proxy x' x y' y (S.StateT [a] m) ()
+unDraw a = lift . S.modify $ (a:)
 {-# INLINABLE unDraw #-}
 
 -- | Peek at the next element without consuming it
-peek :: (Monad m, P.Proxy p) => StateP [a] p () (Maybe a) y' y m (Maybe a)
+peek :: Monad m => P.Proxy () (Maybe a) y' y (S.StateT [a] m) (Maybe a)
 peek = do
     ma <- draw
     case ma of
@@ -88,7 +77,7 @@ peek = do
 {-# INLINABLE peek #-}
 
 -- | Check if at end of input stream.
-isEndOfInput :: (Monad m, P.Proxy p) => StateP [a] p () (Maybe a) y' y m Bool
+isEndOfInput :: Monad m => P.Proxy () (Maybe a) y' y (S.StateT [a] m) Bool
 isEndOfInput = do
     ma <- peek
     case ma of
@@ -100,7 +89,7 @@ isEndOfInput = do
 
     Note: 'drawAll' is usually an anti-pattern.
 -}
-drawAll :: (Monad m, P.Proxy p) => () -> StateP [a] p () (Maybe a) y' y m [a]
+drawAll :: Monad m => () -> P.Proxy () (Maybe a) y' y (S.StateT [a] m) [a]
 drawAll = \() -> go id
   where
     go diffAs = do
@@ -111,7 +100,7 @@ drawAll = \() -> go id
 {-# INLINABLE drawAll #-}
 
 -- | Consume the input completely, discarding all values
-skipAll :: (Monad m, P.Proxy p) => () -> StateP [a] p () (Maybe a) y' y m ()
+skipAll :: Monad m => () -> P.Proxy () (Maybe a) y' y (S.StateT [a] m) ()
 skipAll = \() -> go
   where
     go = do
@@ -123,8 +112,8 @@ skipAll = \() -> go
 
 -- | Forward up to the specified number of elements downstream
 passUpTo
-    :: (Monad m, P.Proxy p)
-    => Int -> () -> P.Pipe (StateP [a] p) (Maybe a) (Maybe a) m r
+    :: Monad m
+    => Int -> () -> P.Pipe (Maybe a) (Maybe a) (S.StateT [a] m) r
 passUpTo n0 = \() -> go n0
   where
     go n0 =
@@ -142,8 +131,8 @@ passUpTo n0 = \() -> go n0
     possible
 -}
 passWhile
-    :: (Monad m, P.Proxy p)
-    => (a -> Bool) -> () -> P.Pipe (StateP [a] p) (Maybe a) (Maybe a) m r
+    :: Monad m
+    => (a -> Bool) -> () -> P.Pipe (Maybe a) (Maybe a) (S.StateT [a] m) r
 passWhile pred = \() -> go
   where
     go = do
@@ -170,17 +159,17 @@ passWhile pred = \() -> go
 {-| Guard a pipe from terminating by wrapping every output in 'Just' and ending
     with a never-ending stream of 'Nothing's.
 -}
-wrap :: (Monad m, P.Proxy p) => p a' a b' b m r -> p a' a b' (Maybe b) m s
-wrap = \p -> P.runIdentityP $ do
-    P.IdentityP p //> \b -> P.respond (Just b)
+wrap :: Monad m => P.Proxy a' a b' b m r -> P.Proxy a' a b' (Maybe b) m s
+wrap = \p -> do
+    p //> \b -> P.respond (Just b)
     forever $ P.respond Nothing
 {-# INLINABLE wrap #-}
 
 {-| Compose 'unwrap' downstream of a guarded pipe to unwrap all 'Just's and
     terminate on the first 'Nothing'.
 -}
-unwrap :: (Monad m, P.Proxy p) => x -> p x (Maybe a) x a m ()
-unwrap = \x -> P.runIdentityP (go x)
+unwrap :: Monad m => x -> P.Proxy x (Maybe a) x a m ()
+unwrap = \x -> (go x)
   where
     go x = do
         ma <- P.request x
@@ -199,15 +188,15 @@ unwrap = \x -> P.runIdentityP (go x)
 > fmapPull pull = pull
 -}
 fmapPull
-    :: (Monad m, P.Proxy p)
-    => (x -> p x        a  x        b  m r)
-    -> (x -> p x (Maybe a) x (Maybe b) m r)
+    :: Monad m
+    => (() -> P.Pipe a b  m r)
+    -> (() -> P.Pipe (Maybe a) (Maybe b) m r)
 fmapPull f = bindPull (f >-> returnPull)
 {-# INLINABLE fmapPull #-}
 
 -- | Wrap all values flowing downstream in 'Just'.
-returnPull :: (Monad m, P.Proxy p) => x -> p x a x (Maybe a) m r
-returnPull = P.mapD Just
+returnPull :: Monad m => () -> P.Pipe a (Maybe a) m r
+returnPull = P.map Just
 {-# INLINABLE returnPull #-}
 
 {-| Lift a 'Maybe'-generating pipe to a 'Maybe'-transforming pipe by
@@ -230,10 +219,10 @@ Or equivalently:
 > bindPull (f >-> bindPull g) = bindPull f >-> bindPull g
 -}
 bindPull
-    :: (Monad m, P.Proxy p)
-    => (x -> p x        a  x (Maybe b) m r)
-    -> (x -> p x (Maybe a) x (Maybe b) m r)
-bindPull f = P.runIdentityP . (up \>\ P.IdentityP . f)
+    :: Monad m
+    => (x -> P.Proxy x        a  x (Maybe b) m r)
+    -> (x -> P.Proxy x (Maybe a) x (Maybe b) m r)
+bindPull f = up \>\ f
   where
     up a' = do
         ma <- P.request a'
@@ -258,30 +247,20 @@ bindPull f = P.runIdentityP . (up \>\ P.IdentityP . f)
 > zoom id = id
 -}
 zoom
-    :: (Monad m, P.Proxy p)
+    :: Monad m
     => ((s2 -> (s2, s2)) -> (s1 -> (s2, s1)))
     -- ^ @Lens'@ s1 s2
-    -> StateP s2 p a' a b' b m r
+    -> P.Proxy a' a b' b (S.StateT s2 m) r
     -- ^ Local state
-    -> StateP s1 p a' a b' b m r
+    -> P.Proxy a' a b' b (S.StateT s1 m) r
     -- ^ Global state
-zoom lens = \p -> StateP $ \s2_0 ->
-    let (s1_0, s2_0') = lens (\x -> (x, x)) s2_0
-    in  (up >\\ P.thread_P (unStateP p s1_0) s2_0' //> dn) ?>= nx
+zoom lens = hoist (morph lens)
   where
-    up ((a', s1), s2) =
-        let (_, s2') = lens (\x -> (x, s1)) s2
-        in  P.request (a', s2') ?>= \(a, s2'') ->
-            let (s1', s2''') = lens (\x -> (x, x)) s2''
-            in  P.return_P ((a, s1'), s2''')
-    dn ((b, s1), s2) =
-        let (_, s2') = lens (\x -> (x, s1)) s2
-        in  P.respond (b, s2') ?>= \(b', s2'') ->
-            let (s1', s2''') = lens (\x -> (x, x)) s2''
-            in  P.return_P ((b', s1'), s2''')
-    nx ((r, s1), s2) =
-        let (_, s2') = lens (\x -> (x, s1)) s2
-        in  P.return_P (r, s2')
+    morph l (S.StateT f) = S.StateT $ \s ->
+      let (s2, _) = l (\x -> (x, x)) s
+      in f s2 >>= \(r, s2') ->
+          let (_, s1') = l (\x -> (x, s2')) s
+          in return (r, s1')
 {-# INLINABLE zoom #-}
 
 {-| A @Lens'@ to the first element of a pair.
@@ -290,7 +269,7 @@ zoom lens = \p -> StateP $ \s2_0 ->
 
 > _fst :: Lens' (a, b) a
 -}
-_fst :: (Functor f) => (a -> f b) -> ((a, x) -> f (b, x))
+_fst :: (Functor f) => (a -> f b) -> (a, x) -> f (b, x)
 _fst = \f (a, x) -> fmap (\b -> (b, x)) (f a)
 {-# INLINABLE _fst #-}
 
@@ -305,7 +284,5 @@ _snd = \f (x, a) -> fmap (\b -> (x, b)) (f a)
 {-# INLINABLE _snd #-}
 
 {- $reexports
-    "Control.Proxy.Trans.State" re-exports all functions.
-
     "Data.Monoid" re-exports the 'Monoid' class.
 -}
