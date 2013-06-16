@@ -51,7 +51,7 @@ import Data.Monoid (Monoid(mempty, mappend))
 
     A 'Nothing' return value indicates end of input.
 -}
-draw :: Monad m => P.Proxy () (Maybe a) y' y (S.StateT [a] m) (Maybe a)
+draw :: Monad m => P.Consumer (Maybe a) (S.StateT [a] m) (Maybe a)
 draw = do
     s <- lift S.get
     case s of
@@ -62,12 +62,12 @@ draw = do
 {-# INLINABLE draw #-}
 
 -- | Push an element back onto the leftovers buffer
-unDraw :: Monad m => a -> P.Proxy x' x y' y (S.StateT [a] m) ()
+unDraw :: Monad m => a -> P.Effect (S.StateT [a] m) ()
 unDraw a = lift . S.modify $ (a:)
 {-# INLINABLE unDraw #-}
 
 -- | Peek at the next element without consuming it
-peek :: Monad m => P.Proxy () (Maybe a) y' y (S.StateT [a] m) (Maybe a)
+peek :: Monad m => P.Consumer (Maybe a) (S.StateT [a] m) (Maybe a)
 peek = do
     ma <- draw
     case ma of
@@ -77,7 +77,7 @@ peek = do
 {-# INLINABLE peek #-}
 
 -- | Check if at end of input stream.
-isEndOfInput :: Monad m => P.Proxy () (Maybe a) y' y (S.StateT [a] m) Bool
+isEndOfInput :: Monad m => P.Consumer (Maybe a) (S.StateT [a] m) Bool
 isEndOfInput = do
     ma <- peek
     case ma of
@@ -89,7 +89,7 @@ isEndOfInput = do
 
     Note: 'drawAll' is usually an anti-pattern.
 -}
-drawAll :: Monad m => () -> P.Proxy () (Maybe a) y' y (S.StateT [a] m) [a]
+drawAll :: Monad m => () -> P.Consumer (Maybe a) (S.StateT [a] m) [a]
 drawAll = \() -> go id
   where
     go diffAs = do
@@ -100,7 +100,7 @@ drawAll = \() -> go id
 {-# INLINABLE drawAll #-}
 
 -- | Consume the input completely, discarding all values
-skipAll :: Monad m => () -> P.Proxy () (Maybe a) y' y (S.StateT [a] m) ()
+skipAll :: Monad m => () -> P.Consumer (Maybe a) (S.StateT [a] m) ()
 skipAll = \() -> go
   where
     go = do
